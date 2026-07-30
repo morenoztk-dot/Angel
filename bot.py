@@ -45,7 +45,7 @@ _ACTIVATION_KEY = "feelingcherishe"
 DEACTIVATE_BOT_ID = 1515404435394793472
 
 # Link do servidor de suporte
-SUPPORT_SERVER = "https://discord.gg/RyYZAJkw6k"
+SUPPORT_SERVER = "https://discord.gg/DpuSaUymhA"
 
 # ─── Database ────────────────────────────────────────────────────────────────
 
@@ -234,6 +234,7 @@ def _make_default_guild_data():
         },
         "instagram_posts": {},
         "png_role_id": None,
+        "join_role_id": None,
     }
 
 def _apply_guild_defaults(gd: dict):
@@ -325,6 +326,7 @@ def _apply_guild_defaults(gd: dict):
         ("instagram_config", {"channel_id": None, "role_id": None}),
         ("instagram_posts", {}),
         ("png_role_id", None),
+        ("join_role_id", None),
     ]:
         if nk not in gd:
             gd[nk] = nv
@@ -492,9 +494,11 @@ LOG_CHANNELS = {
     "castigo":        "log-castigo",
     "kick":           "log-kick",
     "nuke":           "log-nuke",
-    "voice_join":     "log-entrada-call",
-    "voice_leave":    "log-saida-call",
-    "voice_mute":     "log-mute-call",
+    "voice_join":       "log-entrada-call",
+    "voice_leave":      "log-saida-call",
+    "voice_move":       "log-move-call",
+    "voice_disconnect": "log-disconnect-call",
+    "voice_mute":       "log-mute-call",
     "anti_raid":      "log-anti-raid",
     "anti_spam":      "log-anti-spam",
     "anti_gore":      "log-anti-gore",
@@ -2259,14 +2263,68 @@ async def on_voice_state_update(member, before, after):
             await send_log(member.guild, "voice_join", embed)
 
         elif before.channel and not after.channel:
-            embed = create_embed(member.guild, "Saiu de Call")
-            embed.description = (
-                f"**Usuario:** {member.mention} ({member.id})\n"
-                f"**Canal:** {before.channel.name} ({before.channel.id})\n"
-                f"**Horario:** <t:{now}:F>"
-            )
-            await send_log(member.guild, "voice_leave", embed)
+            # Verifica se foi desconectado por alguém (audit log)
+            disconnect_actor = None
+            try:
+                async for entry in member.guild.audit_logs(
+                    action=discord.AuditLogAction.member_disconnect, limit=3
+                ):
+                    if (datetime.now(timezone.utc).timestamp() - entry.created_at.timestamp()) < 5:
+                        disconnect_actor = entry.user
+                        break
+            except Exception:
+                pass
+
+            if disconnect_actor and disconnect_actor.id != member.id:
+                embed = create_embed(member.guild, "Membro Desconectado da Call")
+                embed.description = (
+                    f"**Usuario:** {member.mention} ({member.id})\n"
+                    f"**Canal:** {before.channel.name} ({before.channel.id})\n"
+                    f"**Desconectado por:** {disconnect_actor.mention} ({disconnect_actor.id})\n"
+                    f"**Horario:** <t:{now}:F>"
+                )
+                await send_log(member.guild, "voice_disconnect", embed)
+            else:
+                embed = create_embed(member.guild, "Saiu de Call")
+                embed.description = (
+                    f"**Usuario:** {member.mention} ({member.id})\n"
+                    f"**Canal:** {before.channel.name} ({before.channel.id})\n"
+                    f"**Horario:** <t:{now}:F>"
+                )
+                await send_log(member.guild, "voice_leave", embed)
             await handle_anti_disconnect(member.guild, member)
+
+        # Log de mover entre canais de voz
+        elif before.channel and after.channel and before.channel.id != after.channel.id:
+            move_actor = None
+            try:
+                async for entry in member.guild.audit_logs(
+                    action=discord.AuditLogAction.member_move, limit=3
+                ):
+                    if (datetime.now(timezone.utc).timestamp() - entry.created_at.timestamp()) < 5:
+                        move_actor = entry.user
+                        break
+            except Exception:
+                pass
+
+            if move_actor and move_actor.id != member.id:
+                embed = create_embed(member.guild, "Membro Movido de Call")
+                embed.description = (
+                    f"**Usuario:** {member.mention} ({member.id})\n"
+                    f"**De:** {before.channel.name} ({before.channel.id})\n"
+                    f"**Para:** {after.channel.name} ({after.channel.id})\n"
+                    f"**Movido por:** {move_actor.mention} ({move_actor.id})\n"
+                    f"**Horario:** <t:{now}:F>"
+                )
+            else:
+                embed = create_embed(member.guild, "Mudou de Canal de Voz")
+                embed.description = (
+                    f"**Usuario:** {member.mention} ({member.id})\n"
+                    f"**De:** {before.channel.name} ({before.channel.id})\n"
+                    f"**Para:** {after.channel.name} ({after.channel.id})\n"
+                    f"**Horario:** <t:{now}:F>"
+                )
+            await send_log(member.guild, "voice_move", embed)
 
         if before.mute != after.mute:
             mute_actor = None
@@ -3834,7 +3892,7 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
             "Bem-vindo ao **AGL Bot**, bot de moderacao e gestao do Discord.\n\n"
             "Use o menu abaixo para navegar entre as categorias de comandos.\n\n"
             f"Prefixo atual: `{p}`\n"
-            f"Suporte: <https://discord.gg/RyYZAJkw6k>"
+            f"Suporte: <{SUPPORT_SERVER}>"
         )
         return e
 
@@ -3944,6 +4002,10 @@ def _build_help_embed(guild, p, category: str) -> discord.Embed:
             f"`{p}banlimits` — ver painel de contadores de ban\n"
             f"`{p}resetlimit` — resetar limites de ban (apenas dono do bot)\n"
             f"`{p}criarantiban` — criar cargo Anti-Ban posicionado abaixo do bot"
+        ), inline=False)
+        e.add_field(name="Cargo Automático", value=(
+            f"`{p}setautorole @cargo` — define o cargo dado automaticamente a todo membro que entra no servidor\n"
+            f"Para remover: `{p}setautorole` sem mencionar cargo"
         ), inline=False)
         e.add_field(name="Permissao de Dono", value=(
             f"`{p}addownerperm @cargo` — conceder permissao de dono a um cargo\n"
@@ -6758,6 +6820,7 @@ bot.command(name="setcastigorole")(_make_role_setter("castigo_role_id", "Cargo C
 bot.command(name="setmutecallrole")(_make_role_setter("mute_call_role_id", "Cargo MuteCall"))
 bot.command(name="setantibanrole")(_make_role_setter("antiban_role_id", "Cargo AntiBan"))
 bot.command(name="setpngrole")(_make_role_setter("png_role_id", "Cargo PNG"))
+bot.command(name="setautorole")(_make_role_setter("join_role_id", "Cargo Automático (Join)"))
 
 @bot.command(name="setsorteiorole")
 async def setsorteiorole(ctx, acao: str = None, cargo: discord.Role = None):
@@ -6959,6 +7022,22 @@ async def on_member_join_antiban_hook(member: discord.Member):
 @bot.listen("on_member_join")
 async def _member_join_antiban(member: discord.Member):
     await on_member_join_antiban_hook(member)
+
+@bot.listen("on_member_join")
+async def _member_join_autorole(member: discord.Member):
+    """Dá o cargo automático (join_role_id) ao membro ao entrar, se configurado."""
+    if member.bot:
+        return
+    try:
+        gd = get_guild_data(member.guild.id)
+        role_id = gd.get("join_role_id")
+        if not role_id:
+            return
+        role = member.guild.get_role(int(role_id))
+        if role and member_below_bot(member.guild, member):
+            await member.add_roles(role, reason="Cargo automático ao entrar no servidor")
+    except Exception as e:
+        print(f"[ERRO] _member_join_autorole: {e}", flush=True)
 
 # Inicia as tasks quando o bot ficar pronto
 @bot.listen("on_ready")
